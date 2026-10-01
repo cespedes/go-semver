@@ -16,7 +16,7 @@ import (
 var testZip = func() []byte {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)
-	f, _ := w.Create("example.com/!mod@v1.2.0/mod.go")
+	f, _ := w.Create("example.com/Mod@v1.2.0/mod.go")
 	io.WriteString(f, "package mod\n")
 	w.Close()
 	return buf.Bytes()
@@ -100,7 +100,7 @@ func TestGoModAndZip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(z.File) != 1 || z.File[0].Name != "example.com/!mod@v1.2.0/mod.go" {
+	if len(z.File) != 1 || z.File[0].Name != "example.com/Mod@v1.2.0/mod.go" {
 		t.Errorf("Zip files = %v", z.File)
 	}
 	rc, err := z.File[0].Open()
