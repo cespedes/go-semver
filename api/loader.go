@@ -52,6 +52,11 @@ type Module struct {
 	// It is empty if the go.mod file does not have one.
 	GoVersion string
 
+	// DeclaredPath is the path in the "module" directive of the go.mod
+	// file. It is empty if the file does not have one, and should be equal
+	// to Path.
+	DeclaredPath string
+
 	// Packages are the packages of the module that can be imported by other
 	// modules (that is, excluding internal and main packages), sorted by
 	// import path.
@@ -91,6 +96,7 @@ type Loader struct {
 type source struct {
 	mod       module.Version
 	fs        *sourceFS
+	declared  string           // as in the module directive
 	goVersion string           // as in the go directive
 	requires  []module.Version // as listed in go.mod
 }
@@ -137,7 +143,7 @@ func (l *Loader) Load(ctx context.Context, modulePath, version string) (*Module,
 	if err != nil {
 		return nil, err
 	}
-	m := &Module{Path: modulePath, Version: version, GoVersion: src.goVersion}
+	m := &Module{Path: modulePath, Version: version, GoVersion: src.goVersion, DeclaredPath: src.declared}
 	for _, dir := range src.fs.packageDirs() {
 		e, err := l.loadPackage(src, dir)
 		if errors.Is(err, errNoGoFiles) {
@@ -183,6 +189,9 @@ func (l *Loader) source(mv module.Version) (*source, error) {
 		return nil, fmt.Errorf("api: %s@%s: %w", mv.Path, mv.Version, err)
 	}
 	s := &source{mod: mv, fs: fsys}
+	if mf.Module != nil {
+		s.declared = mf.Module.Mod.Path
+	}
 	if mf.Go != nil {
 		s.goVersion = mf.Go.Version
 	}

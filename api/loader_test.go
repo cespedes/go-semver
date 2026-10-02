@@ -102,6 +102,9 @@ func TestLoad(t *testing.T) {
 	if m.GoVersion != "1.21" {
 		t.Errorf("GoVersion = %q", m.GoVersion)
 	}
+	if m.DeclaredPath != "example.com/app" {
+		t.Errorf("DeclaredPath = %q", m.DeclaredPath)
+	}
 	var paths []string
 	for _, p := range m.Packages {
 		paths = append(paths, p.ImportPath)
