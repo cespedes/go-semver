@@ -11,8 +11,9 @@ major version, a new release must not break code that compiled and worked
 against an earlier one. `go-semver` verifies that a module actually keeps
 that promise.
 
-> **Status:** early stage. This document describes what the project aims to
-> be; not everything below is implemented yet.
+> **Status:** early stage. Modules published on a module proxy can already
+> be checked (see [Usage](#usage)); checking a local working tree and some of
+> the checks listed below are not implemented yet.
 
 ## What it checks
 
@@ -57,24 +58,38 @@ identifiers, new methods on concrete types, new fields in structs that are
 documented as not safe to use unkeyed, etc.) are not reported as breaking, but
 are used to decide the minimum required version bump.
 
-## Intended usage
-
-The exact command-line interface is not final. The goal is something along
-these lines:
+## Usage
 
 ```sh
-# Compare two versions of a module
+go install github.com/cespedes/go-semver/cmd/go-semver@latest
+
+# Compare two versions of a module and check the version bump between them
 go-semver diff example.com/mod@v1.4.0 example.com/mod@v1.5.0
 
-# Check every consecutive pair of released versions of a module
+# Check every released version of a module (and of its other major versions)
 go-semver check example.com/mod
-
-# Check the working tree against the latest release (e.g. in CI)
-go-semver check .
 ```
 
-The tool should exit with a non-zero status when it finds a violation, so it
-can be used as a CI gate before tagging a release.
+Modules are downloaded from `https://proxy.golang.org`, or from the proxy
+given with `-proxy` or in the `GOPROXY` environment variable. Run
+`go-semver check -v` to see the API changes of every release, and
+`-prereleases` to include pre-release versions.
+
+The exit status is 0 if no violation was found, 1 if there were violations,
+and 2 on usage errors or if a module could not be analyzed, so the tool can be
+used as a CI gate.
+
+Checking the working tree against the latest release (`go-semver check .`) is
+planned.
+
+### Limitations
+
+- Only the platform of the machine running the tool is analyzed, with cgo
+  disabled: files importing `"C"` are ignored, so APIs that depend on them may
+  be reported as changed.
+- `replace` and `exclude` directives are ignored.
+- Pre-releases and `v0` versions are exempt from the API compatibility rules.
+- Versions that cannot be downloaded or type-checked are reported and skipped.
 
 ## Related work
 
