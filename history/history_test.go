@@ -104,6 +104,37 @@ func TestAnalyze(t *testing.T) {
 	}
 }
 
+func TestAnalyzeMajorGap(t *testing.T) {
+	const m = "example.com/m"
+	a := &Analyzer{Proxy: newFakeProxy(t,
+		fakeModule{m, "v1.0.0", gomod(m), srcA},
+		// There is no /v2.
+		fakeModule{m + "/v3", "v3.0.0", gomod(m + "/v3"), srcB},
+		fakeModule{m + "/v4", "v4.0.0", gomod(m + "/v4"), srcB},
+	)}
+	for _, path := range []string{m, m + "/v3", m + "/v4"} {
+		res, err := a.Analyze(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := versionList(res), "v1.0.0 v3.0.0 v4.0.0"; got != want {
+			t.Errorf("Analyze(%s): versions = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestMajorOf(t *testing.T) {
+	tests := map[string]int{
+		"example.com/m": 1, "example.com/m/v2": 2, "example.com/m/v12": 12,
+		"gopkg.in/yaml.v3": 3,
+	}
+	for path, want := range tests {
+		if got, err := majorOf(path); err != nil || got != want {
+			t.Errorf("majorOf(%q) = %d, %v; want %d", path, got, err, want)
+		}
+	}
+}
+
 func TestAnalyzePrereleases(t *testing.T) {
 	const m = "example.com/m"
 	a := &Analyzer{

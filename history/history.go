@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/mod/modfile"
@@ -99,9 +100,11 @@ func (r *Result) Violations() []check.Violation {
 }
 
 // Analyze downloads all the released versions of the module, including those
-// of its other major versions (found by probing /v2, /v3... until one has no
-// versions), and checks them. modulePath may carry any
+// of its other major versions, and checks them. modulePath may carry any
 // major version suffix: the whole family of modules is analyzed.
+//
+// Other major versions are found by probing /v2, /v3... until several in a
+// row have no versions, since a module may skip some major versions.
 //
 // Versions that cannot be downloaded or type-checked are reported in
 // Version.Err rather than failing the analysis.
@@ -144,11 +147,22 @@ func (a *Analyzer) Analyze(ctx context.Context, modulePath string) (*Result, err
 	return res, nil
 }
 
+// maxMajorGap is the number of consecutive major versions without any
+// published version after which the search for more major versions stops.
+// Gaps exist: for instance, github.com/go-jose/go-jose has no /v2 module, as
+// that major version was published under another path, but it has /v3 and /v4.
+const maxMajorGap = 3
+
 // listVersions lists the versions of all the major versions of the module in
 // ascending order, with the retracted ones marked.
 func (a *Analyzer) listVersions(ctx context.Context, modulePath string) ([]*Version, error) {
+	requested, err := majorOf(modulePath)
+	if err != nil {
+		return nil, err
+	}
 	var all []*Version
-	for major := 1; ; major++ {
+	misses := 0 // consecutive majors without versions
+	for major := 1; misses < maxMajorGap || major <= requested; major++ {
 		path, err := pathForMajor(modulePath, major)
 		if err != nil {
 			return nil, err
@@ -158,12 +172,10 @@ func (a *Analyzer) listVersions(ctx context.Context, modulePath string) ([]*Vers
 			return nil, err
 		}
 		if len(list) == 0 {
-			if major == 1 {
-				// v0 and v1 share a path, but a module may start at v2.
-				continue
-			}
-			break
+			misses++
+			continue
 		}
+		misses = 0
 		retracted, err := a.retractions(ctx, path, list)
 		if err != nil {
 			return nil, err
@@ -216,6 +228,23 @@ func (a *Analyzer) retractions(ctx context.Context, path string, list []string) 
 		}
 		return false
 	}, nil
+}
+
+// majorOf returns the major version in the suffix of modulePath, or 1 if it
+// has none.
+func majorOf(modulePath string) (int, error) {
+	_, pathMajor, ok := module.SplitPathVersion(modulePath)
+	if !ok {
+		return 0, fmt.Errorf("history: invalid module path %q", modulePath)
+	}
+	if pathMajor == "" {
+		return 1, nil
+	}
+	n, err := strconv.Atoi(strings.TrimLeft(pathMajor, "/.v"))
+	if err != nil {
+		return 0, fmt.Errorf("history: invalid module path %q", modulePath)
+	}
+	return n, nil
 }
 
 // pathForMajor returns the module path of the given major version of the
