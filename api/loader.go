@@ -13,9 +13,13 @@
 //     constraints are evaluated for it), and cgo is disabled: files that
 //     import "C" are ignored.
 //   - replace and exclude directives, and vendoring, are ignored.
-//   - Dependencies that are not listed in go.mod (modules declaring a go
-//     version older than 1.17 do not have to list all of them) cannot be
-//     resolved, which is reported as a type error of the affected package.
+//   - Dependencies that are not listed in go.mod (modules without go.mod, or
+//     declaring a go version older than 1.17, do not list all of them) are
+//     looked up in the proxy: the module providing the package is the one
+//     with the longest matching path, and its version the latest release
+//     published before the version being analyzed. This is an approximation
+//     of what a build at that time would have used. Packages that still
+//     cannot be found are reported as type errors.
 package api
 
 import (
@@ -34,11 +38,14 @@ import (
 	"path"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 
 	"github.com/cespedes/go-semver/proxy"
 )
@@ -90,6 +97,22 @@ type Loader struct {
 	build   build.Context
 	sources map[module.Version]*source
 	pkgs    map[pkgKey]*pkgEntry
+
+	// Caches of the lookup of dependencies that are not required.
+	fallbacks map[fallbackKey]fallbackResult
+	versions  map[string][]string // module path -> released versions
+	times     map[module.Version]time.Time
+}
+
+type fallbackKey struct {
+	from       module.Version
+	importPath string
+}
+
+type fallbackResult struct {
+	src *source
+	dir string
+	err error
 }
 
 // source is a downloaded module version.
@@ -130,6 +153,9 @@ func (l *Loader) init() {
 	l.build.IsAbsPath = path.IsAbs
 	l.sources = make(map[module.Version]*source)
 	l.pkgs = make(map[pkgKey]*pkgEntry)
+	l.fallbacks = make(map[fallbackKey]fallbackResult)
+	l.versions = make(map[string][]string)
+	l.times = make(map[module.Version]time.Time)
 	if l.Proxy == nil {
 		l.Proxy = new(proxy.Client)
 	}
@@ -212,7 +238,7 @@ func (l *Loader) resolve(src *source, importPath string) (*source, string, error
 		}
 	}
 	if best.Path == "" {
-		return nil, "", fmt.Errorf("no module providing package %s is required by %s", importPath, src.mod.Path)
+		return l.resolveUnrequired(src, importPath)
 	}
 	dep := src
 	if best != src.mod {
@@ -222,6 +248,104 @@ func (l *Loader) resolve(src *source, importPath string) (*source, string, error
 		}
 	}
 	return dep, strings.TrimPrefix(strings.TrimPrefix(importPath, best.Path), "/"), nil
+}
+
+// resolveUnrequired finds the module providing importPath, which is not
+// provided by any of the requirements of src.
+func (l *Loader) resolveUnrequired(src *source, importPath string) (*source, string, error) {
+	key := fallbackKey{src.mod, importPath}
+	r, ok := l.fallbacks[key]
+	if !ok {
+		r.src, r.dir, r.err = l.findProvider(src.mod, importPath)
+		l.fallbacks[key] = r
+	}
+	return r.src, r.dir, r.err
+}
+
+// findProvider looks in the proxy for the module providing importPath, trying
+// the longest module paths first, and picks the latest version of it that was
+// published before from.
+func (l *Loader) findProvider(from module.Version, importPath string) (*source, string, error) {
+	cutoff, err := l.timeOf(from)
+	if err != nil {
+		return nil, "", err
+	}
+	elems := strings.Split(importPath, "/")
+	for n := len(elems); n >= 2; n-- {
+		path := strings.Join(elems[:n], "/")
+		version, err := l.versionAt(path, cutoff)
+		if err != nil {
+			return nil, "", err
+		}
+		if version == "" {
+			continue
+		}
+		dep, err := l.source(module.Version{Path: path, Version: version})
+		if err != nil {
+			return nil, "", err
+		}
+		dir := strings.Join(elems[n:], "/")
+		if len(dep.fs.goFiles(dir)) > 0 {
+			return dep, dir, nil
+		}
+	}
+	return nil, "", fmt.Errorf("no module providing package %s is required by %s, and none was found", importPath, from.Path)
+}
+
+// versionAt returns the latest release of the module with the given path that
+// was published at or before t, or the earliest one if all are later. It
+// returns "" if the proxy does not know the module.
+func (l *Loader) versionAt(path string, t time.Time) (string, error) {
+	list, ok := l.versions[path]
+	if !ok {
+		all, err := l.Proxy.Versions(l.ctx, path)
+		if err != nil && !errors.Is(err, proxy.ErrNotFound) {
+			return "", err
+		}
+		for _, v := range all {
+			if semver.Prerelease(v) == "" {
+				list = append(list, v)
+			}
+		}
+		l.versions[path] = list
+	}
+	if len(list) == 0 {
+		// Modules without tags only have pseudo-versions.
+		info, err := l.Proxy.Latest(l.ctx, path)
+		if errors.Is(err, proxy.ErrNotFound) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		return info.Version, nil
+	}
+	var searchErr error
+	i := sort.Search(len(list), func(i int) bool {
+		vt, err := l.timeOf(module.Version{Path: path, Version: list[i]})
+		if err != nil {
+			searchErr = err
+			return true
+		}
+		return vt.After(t)
+	})
+	if searchErr != nil {
+		return "", searchErr
+	}
+	return list[max(i-1, 0)], nil
+}
+
+// timeOf returns the time at which a module version was published.
+func (l *Loader) timeOf(mv module.Version) (time.Time, error) {
+	if t, ok := l.times[mv]; ok {
+		return t, nil
+	}
+	info, err := l.Proxy.Info(l.ctx, mv.Path, mv.Version)
+	if err != nil {
+		return time.Time{}, err
+	}
+	l.times[mv] = info.Time
+	return info.Time, nil
 }
 
 // moduleImporter resolves the imports of the packages of a module.

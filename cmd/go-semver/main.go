@@ -185,6 +185,8 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer) (int
 		case v.Err != nil:
 			failed++
 			fmt.Fprintf(stdout, "warning: %s@%s could not be analyzed: %v\n", v.Path, v.Version, v.Err)
+		default:
+			printTypeErrors(stdout, v)
 		}
 	}
 	fmt.Fprintf(stdout, "%s: %d versions (%d retracted, %d not analyzed), %d steps checked\n",
@@ -202,6 +204,17 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer) (int
 	vs := res.Violations()
 	printViolations(stdout, vs)
 	return len(vs), nil
+}
+
+// printTypeErrors warns about the packages of v that could not be fully
+// type-checked, since the changes reported for them may not be accurate.
+func printTypeErrors(w io.Writer, v *history.Version) {
+	for _, p := range v.Module.Packages {
+		if len(p.Errors) > 0 {
+			fmt.Fprintf(w, "warning: %s@%s: package %s has %d type errors, so changes involving it may be inaccurate (first: %v)\n",
+				v.Path, v.Version, p.ImportPath, len(p.Errors), p.Errors[0])
+		}
+	}
 }
 
 func changeLine(c diff.Change) string {

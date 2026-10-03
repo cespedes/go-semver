@@ -2,6 +2,7 @@ package api
 
 import (
 	"archive/zip"
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,21 +15,32 @@ import (
 // zip archive.
 const maxSourceFile = 16 << 20
 
-// sourceFS is a read-only, in-memory view of the files of a module zip
-// archive. File names are relative to the module root and use slashes.
+// sourceFS is a read-only, in-memory view of the Go source files of a module
+// zip archive. File names are relative to the module root and use slashes.
+//
+// Only the non-test .go files that may be imported are kept (not those under
+// testdata, vendor, or directories starting with "." or "_"), and they stay
+// compressed until they are read, so that most of the archive can be garbage
+// collected and the rest takes little memory.
 type sourceFS struct {
 	files  map[string]*zip.File
 	dirs   map[string]map[string]bool // directory -> entry name -> is a directory
 	nested map[string]bool            // directories holding a nested module
 }
 
-// newSourceFS indexes the files of zr, whose names must start with prefix.
+// newSourceFS indexes the source files of zr, whose names must start with
+// prefix.
 func newSourceFS(zr *zip.Reader, prefix string) (*sourceFS, error) {
 	s := &sourceFS{
 		files:  make(map[string]*zip.File),
 		dirs:   make(map[string]map[string]bool),
 		nested: make(map[string]bool),
 	}
+
+	// Copy the compressed data of the files to keep into a new, smaller
+	// archive, so that the original one can be freed.
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
 	for _, f := range zr.File {
 		if strings.HasSuffix(f.Name, "/") {
 			continue
@@ -37,12 +49,40 @@ func newSourceFS(zr *zip.Reader, prefix string) (*sourceFS, error) {
 		if !ok {
 			return nil, fmt.Errorf("zip file %q does not start with %q", f.Name, prefix)
 		}
-		s.files[rel] = f
 		dir, name := path.Split(rel)
 		dir = strings.TrimSuffix(dir, "/")
 		if name == "go.mod" && dir != "" {
 			s.nested[dir] = true
 		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || ignoredDir(dir) {
+			continue
+		}
+		raw, err := f.OpenRaw()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rel, err)
+		}
+		hdr := f.FileHeader
+		dst, err := w.CreateRaw(&hdr)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rel, err)
+		}
+		if _, err := io.Copy(dst, raw); err != nil {
+			return nil, fmt.Errorf("%s: %w", rel, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	kept, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		return nil, err
+	}
+
+	for _, f := range kept.File {
+		rel := strings.TrimPrefix(f.Name, prefix)
+		s.files[rel] = f
+		dir, name := path.Split(rel)
+		dir = strings.TrimSuffix(dir, "/")
 		s.addEntry(dir, name, false)
 		for dir != "" {
 			parent, name := path.Split(dir)

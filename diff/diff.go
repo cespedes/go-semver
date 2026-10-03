@@ -9,8 +9,10 @@ package diff
 import (
 	"fmt"
 	"go/types"
+	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"golang.org/x/exp/apidiff"
 
@@ -73,7 +75,9 @@ func Compare(old, new *api.Module) *Report {
 
 	oldMod := &apidiff.Module{Path: old.Path, Packages: typesOf(old)}
 	newMod := &apidiff.Module{Path: new.Path, Packages: typesOf(new)}
-	for _, c := range apidiff.ModuleChanges(oldMod, newMod).Changes {
+	var changes []apidiff.Change
+	discardStdout(func() { changes = apidiff.ModuleChanges(oldMod, newMod).Changes })
+	for _, c := range changes {
 		r.Changes = append(r.Changes, Change{Message: c.Message, Compatible: c.Compatible})
 	}
 	slices.SortFunc(r.Changes, func(a, b Change) int {
@@ -86,6 +90,30 @@ func Compare(old, new *api.Module) *Report {
 		return strings.Compare(a.Message, b.Message)
 	})
 	return r
+}
+
+var stdoutMu sync.Mutex
+
+// discardStdout calls f with os.Stdout redirected to the null device.
+//
+// apidiff writes diagnostics straight to the standard output when it finds
+// inconsistencies, which happen when the packages being compared have invalid
+// types (see Report.Warnings). They would corrupt the output of programs
+// using this package, and carry no information that is not already in the
+// report.
+func discardStdout(f func()) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		f()
+		return
+	}
+	defer null.Close()
+	orig := os.Stdout
+	os.Stdout = null
+	defer func() { os.Stdout = orig }()
+	f()
 }
 
 func typesOf(m *api.Module) []*types.Package {

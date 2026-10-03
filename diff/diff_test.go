@@ -5,6 +5,8 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
+	"os"
 	"reflect"
 	"testing"
 
@@ -113,5 +115,25 @@ func TestCompareOrderAndWarnings(t *testing.T) {
 	}
 	if len(r.Warnings) != 1 {
 		t.Errorf("Warnings = %q, want one", r.Warnings)
+	}
+}
+
+func TestDiscardStdout(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	discardStdout(func() { os.Stdout.WriteString("noise\n") })
+	if os.Stdout != w {
+		t.Fatal("os.Stdout was not restored")
+	}
+	os.Stdout.WriteString("after\n")
+	w.Close()
+	if data, _ := io.ReadAll(r); string(data) != "after\n" {
+		t.Errorf("stdout = %q, want only the text written outside discardStdout", data)
 	}
 }

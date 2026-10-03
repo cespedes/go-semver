@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"go/types"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,12 +17,17 @@ import (
 type fakeModule struct {
 	path, version, gomod string
 	files                map[string]string
+	time                 string // RFC 3339; defaults to defaultTime
 }
+
+const defaultTime = "2020-01-01T00:00:00Z"
 
 func newFakeProxy(t *testing.T, mods ...fakeModule) *proxy.Client {
 	t.Helper()
 	zips := make(map[string][]byte)
 	gomods := make(map[string]string)
+	infos := make(map[string]string)
+	lists := make(map[string][]string)
 	for _, m := range mods {
 		var buf bytes.Buffer
 		w := zip.NewWriter(&buf)
@@ -36,10 +42,20 @@ func newFakeProxy(t *testing.T, mods ...fakeModule) *proxy.Client {
 		key := m.path + "/@v/" + m.version
 		zips[key] = buf.Bytes()
 		gomods[key] = m.gomod
+		lists[m.path] = append(lists[m.path], m.version)
+		when := m.time
+		if when == "" {
+			when = defaultTime
+		}
+		infos[key] = `{"Version":"` + m.version + `","Time":"` + when + `"}`
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(r.URL.Path, "/")
-		if k, ok := strings.CutSuffix(key, ".zip"); ok && zips[k] != nil {
+		if p, ok := strings.CutSuffix(key, "/@v/list"); ok && lists[p] != nil {
+			w.Write([]byte(strings.Join(lists[p], "\n")))
+		} else if k, ok := strings.CutSuffix(key, ".info"); ok && infos[k] != "" {
+			w.Write([]byte(infos[k]))
+		} else if k, ok := strings.CutSuffix(key, ".zip"); ok && zips[k] != nil {
 			w.Write(zips[k])
 		} else if k, ok := strings.CutSuffix(key, ".mod"); ok && zips[k] != nil {
 			w.Write([]byte(gomods[k]))
@@ -151,5 +167,52 @@ func TestLoadNotFound(t *testing.T) {
 	l := &Loader{Proxy: newFakeProxy(t)}
 	if _, err := l.Load(context.Background(), "example.com/app", "v1.2.0"); err == nil {
 		t.Error("want error")
+	}
+}
+
+func TestLoadUnrequiredDependency(t *testing.T) {
+	lib := func(version, when, typ string) fakeModule {
+		return fakeModule{
+			path: "example.com/lib2", version: version, time: when,
+			gomod: "module example.com/lib2\n",
+			files: map[string]string{"sub/sub.go": "package sub\n\ntype Val " + typ + "\n"},
+		}
+	}
+	// The module has no go.mod requirements, but imports a package of lib2
+	// as it was when the module was published: between v1.0.0 and v1.1.0.
+	app := fakeModule{
+		path: "example.com/app2", version: "v1.0.0", time: "2021-01-01T00:00:00Z",
+		gomod: "module example.com/app2\n",
+		files: map[string]string{"app.go": `package app
+
+import (
+	"example.com/lib2/sub"
+	"example.com/missing/pkg"
+)
+
+func Get() sub.Val { return 0 }
+
+func Missing() pkg.T { return nil }
+`},
+	}
+	l := &Loader{Proxy: newFakeProxy(t, app,
+		lib("v1.0.0", "2020-01-01T00:00:00Z", "int"),
+		lib("v1.1.0", "2022-01-01T00:00:00Z", "string"),
+	)}
+	m, err := l.Load(context.Background(), "example.com/app2", "v1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := m.Packages[0]
+	if got, want := p.Types.Scope().Lookup("Get").Type().String(), "func() example.com/lib2/sub.Val"; got != want {
+		t.Errorf("Get = %s, want %s", got, want)
+	}
+	val := p.Types.Scope().Lookup("Get").Type().(*types.Signature).Results().At(0).Type()
+	if got := val.Underlying().String(); got != "int" {
+		t.Errorf("sub.Val is %s, want int (the version of lib2 available at the time)", got)
+	}
+	// Only the import that cannot be found is an error.
+	if len(p.Errors) != 1 || !strings.Contains(p.Errors[0].Error(), "example.com/missing/pkg") {
+		t.Errorf("errors = %v, want one about example.com/missing/pkg", p.Errors)
 	}
 }
