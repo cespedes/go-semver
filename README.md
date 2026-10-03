@@ -91,6 +91,11 @@ planned.
 - Pre-releases and `v0` versions are exempt from the API compatibility rules.
 - Versions that cannot be downloaded or type-checked are reported and skipped.
 
+## How it works
+
+See [docs/architecture.md](docs/architecture.md) for a description of the
+packages and how they interact.
+
 ## Related work
 
 - [`golang.org/x/exp/apidiff`](https://pkg.go.dev/golang.org/x/exp/apidiff)
